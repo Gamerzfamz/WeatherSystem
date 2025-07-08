@@ -11,7 +11,7 @@ local Skys = Assets:WaitForChild("Skys")
 local Sounds = Assets:WaitForChild("Sounds")
 local VFX = Assets:WaitForChild("VFX")
 
---// Templates for effects
+--// Effect templates
 local rainTemplate = VFX:WaitForChild("Rain")
 local lightningTemplate = VFX:WaitForChild("Lightning")
 
@@ -20,25 +20,23 @@ local lightningSoundTemplate = Sounds:WaitForChild("Thunder")
 local thunderSoundTemplate = Sounds:WaitForChild("Thunder")
 local rainSoundTemplate = Sounds:WaitForChild("Rain")
 
---// Weather definitions
+--// Weather settings
 local weatherTypes = {"Clear", "Rain", "Thunder"}
-
---// Weighted weather chances
 local weatherWeights = {
 	Clear = 5,
 	Rain = 2,
 	Thunder = 2,
 }
 
---// State tracking variables
+--// Internal state
 local lastWeather = nil
 local rainParts = {}
 local thunderRunning = false
-local thunderTask
+local thunderTask = nil
 local lightningParts = {}
-local rainSoundInstance
+local rainSoundInstance = nil
 
--- Replace skybox in Lighting with specified weather sky
+-- Replace the current skybox in Lighting with a new one
 local function setSky(name)
 	local oldSky = Lighting:FindFirstChildOfClass("Sky")
 	if oldSky then oldSky:Destroy() end
@@ -48,7 +46,7 @@ local function setSky(name)
 	end
 end
 
--- Removes all rain effects and stops rain sound
+-- Destroys all active rain effects and stops rain sounds
 local function clearRain()
 	for player, part in pairs(rainParts) do
 		part:Destroy()
@@ -61,7 +59,7 @@ local function clearRain()
 	end
 end
 
--- Creates rain VFX for a single player
+-- Creates rain effects above a player's character
 local function createRainForPlayer(player)
 	if rainParts[player] then return end
 	local part = rainTemplate:Clone()
@@ -71,7 +69,7 @@ local function createRainForPlayer(player)
 	rainParts[player] = part
 end
 
--- Keeps rain VFX above each player's character
+-- Updates positions of rain effects to follow each player's character
 local function updateRainPositions()
 	for player, part in pairs(rainParts) do
 		local character = player.Character
@@ -84,14 +82,14 @@ local function updateRainPositions()
 	end
 end
 
--- Create rain for new players if rain/thunder is active
+-- Event: Player joins — create rain if necessary
 Players.PlayerAdded:Connect(function(player)
 	if lastWeather == "Rain" or lastWeather == "Thunder" then
 		createRainForPlayer(player)
 	end
 end)
 
--- Clean up rain part for players who leave
+-- Event: Player leaves — remove any rain part associated with them
 Players.PlayerRemoving:Connect(function(player)
 	if rainParts[player] then
 		rainParts[player]:Destroy()
@@ -99,7 +97,7 @@ Players.PlayerRemoving:Connect(function(player)
 	end
 end)
 
--- Stops all thunder effects and sounds
+-- Stops all active thunder tasks and destroys lightning visuals
 local function stopThunder()
 	thunderRunning = false
 	if thunderTask then
@@ -114,7 +112,7 @@ local function stopThunder()
 	lightningParts = {}
 end
 
--- Updates sound volumes based on proximity to a position
+-- Adjusts volume of provided sound instances based on proximity to a given position
 local function updateSoundVolumes(sounds, position)
 	local players = Players:GetPlayers()
 	for _, sound in pairs(sounds) do
@@ -133,24 +131,58 @@ local function updateSoundVolumes(sounds, position)
 	end
 end
 
--- Mutes rain sound if any player is within a mute zone
+-- Mutes rain sound if any player is within a mute zone radius
 local function updateRainSoundVolume(mutePosition, muteRadius)
 	if not rainSoundInstance then return end
-	local players = Players:GetPlayers()
 	local mute = false
-	for _, player in pairs(players) do
+	for _, player in pairs(Players:GetPlayers()) do
 		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-		if hrp then
-			if (hrp.Position - mutePosition).Magnitude <= muteRadius then
-				mute = true
-				break
-			end
+		if hrp and (hrp.Position - mutePosition).Magnitude <= muteRadius then
+			mute = true
+			break
 		end
 	end
 	rainSoundInstance.Volume = mute and 0 or 1
 end
 
--- Spawns a single lightning/thunder strike near a player
+-- Recursive function to create branching lightning bolt
+local function createForkingLightning(startPos, maxForks, branchLength)
+	local function generateFork(pos, direction, depth)
+		if depth > maxForks then return end
+
+		local segment = Instance.new("Part")
+		segment.Size = Vector3.new(0.2, branchLength, 0.2)
+		segment.Anchored = true
+		segment.CanCollide = false
+		segment.Material = Enum.Material.Neon
+		segment.Color = Color3.fromRGB(255, 255, 255)
+		segment.Transparency = 0.25
+
+		local offset = direction.Unit * branchLength
+		local newPos = pos + offset
+		local cframe = CFrame.new(pos, newPos) * CFrame.new(0, branchLength / 2, 0)
+		segment.CFrame = cframe
+		segment.Parent = Workspace
+		table.insert(lightningParts, segment)
+
+		-- Primary continuation
+		if math.random() < 0.7 then
+			local newDirection = (direction + Vector3.new(math.random() - 0.5, math.random() * 0.5, math.random() - 0.5)).Unit
+			generateFork(newPos, newDirection, depth + 1)
+		end
+
+		-- Optional secondary fork
+		if math.random() < 0.5 then
+			local forkDirection = Vector3.new(math.random() - 0.5, math.random() * 0.5, math.random() - 0.5).Unit
+			generateFork(newPos, forkDirection, depth + 1)
+		end
+	end
+
+	local downward = Vector3.new(0, -1, 0)
+	generateFork(startPos, downward, 1)
+end
+
+-- Spawns forking lightning effects and plays thunder near a player
 local function spawnLightningNearPlayer(player)
 	local character = player.Character
 	if not character then return end
@@ -159,34 +191,36 @@ local function spawnLightningNearPlayer(player)
 
 	local offsetX = math.random(-20, 20)
 	local offsetZ = math.random(-20, 20)
-	local offsetY = math.random(5, 10)
+	local offsetY = math.random(10, 20)
 	local spawnPos = hrp.Position + Vector3.new(offsetX, offsetY, offsetZ)
 
-	local lightningPart = lightningTemplate:Clone()
-	lightningPart.Anchored = true
-	lightningPart.CanCollide = false
-	lightningPart.CFrame = CFrame.new(spawnPos)
-	lightningPart.Parent = Workspace
-	table.insert(lightningParts, lightningPart)
+	createForkingLightning(spawnPos, 6, 4)
 
 	local lightningSound = lightningSoundTemplate:Clone()
-	lightningSound.Parent = lightningPart
+	lightningSound.Parent = Workspace
+	lightningSound.Position = spawnPos
 	lightningSound.RollOffMode = Enum.RollOffMode.Linear
 	lightningSound.MaxDistance = 100
 	lightningSound:Play()
 
 	local thunderSound = thunderSoundTemplate:Clone()
-	thunderSound.Parent = lightningPart
+	thunderSound.Parent = Workspace
+	thunderSound.Position = spawnPos
 	thunderSound.RollOffMode = Enum.RollOffMode.Linear
 	thunderSound.MaxDistance = 150
 	thunderSound:Play()
 
-	-- Auto-remove after 4 seconds and update volume based on player proximity
+	-- Cleanup after delay
 	local connection
 	local startTime = tick()
 	connection = RunService.Heartbeat:Connect(function()
 		if tick() - startTime > 4 then
-			if lightningPart and lightningPart.Parent then lightningPart:Destroy() end
+			for _, part in pairs(lightningParts) do
+				if part and part.Parent then
+					part:Destroy()
+				end
+			end
+			lightningParts = {}
 			connection:Disconnect()
 		else
 			updateSoundVolumes({lightningSound, thunderSound}, spawnPos)
@@ -195,46 +229,44 @@ local function spawnLightningNearPlayer(player)
 	end)
 end
 
--- Periodically strike lightning near random players
+-- Periodically triggers lightning strikes near random players
 local function thunderCycle()
 	while thunderRunning do
 		local players = Players:GetPlayers()
 		if #players > 0 then
 			local used = {}
-			local strikes = math.min(#players, math.random(3,7))
+			local strikes = math.min(#players, math.random(3, 7))
 			for _ = 1, strikes do
-				local idx
-				repeat
-					idx = math.random(1,#players)
-				until not used[idx]
+				local idx repeat idx = math.random(1, #players) until not used[idx]
 				used[idx] = true
 				spawnLightningNearPlayer(players[idx])
 			end
 		end
-		task.wait(math.random(10,20))
+		task.wait(math.random(10, 20))
 	end
 end
 
--- Starts thunder logic if not already running
+-- Starts thunder cycle if not already active
 local function startThunder()
 	if thunderRunning then return end
 	thunderRunning = true
 	thunderTask = task.spawn(thunderCycle)
 end
 
--- Removes any sounds left in the Workspace
+-- Removes all sounds from Workspace
 local function clearSounds()
 	for _, sound in pairs(Workspace:GetChildren()) do
-		if sound:IsA("Sound") and sound.Parent == Workspace then
+		if sound:IsA("Sound") then
 			sound:Stop()
 			sound:Destroy()
 		end
 	end
 end
 
--- Applies the given weather type
+-- Applies the desired weather condition
 local function applyWeather(weather)
 	if weather == lastWeather then return end
+
 	setSky(weather)
 	clearSounds()
 	stopThunder()
@@ -242,7 +274,6 @@ local function applyWeather(weather)
 
 	if weather == "Clear" then
 		lastWeather = "Clear"
-		return
 
 	elseif weather == "Rain" then
 		for _, player in pairs(Players:GetPlayers()) do
@@ -269,12 +300,11 @@ local function applyWeather(weather)
 	end
 end
 
--- Chooses a random weather based on weight
+-- Chooses a new weather type using weighted randomness
 local function chooseWeather()
 	local totalWeight = 0
-	for _, w in pairs(weatherWeights) do
-		totalWeight += w
-	end
+	for _, w in pairs(weatherWeights) do totalWeight += w end
+
 	local pick = math.random() * totalWeight
 	local cumulative = 0
 	for _, weather in pairs(weatherTypes) do
@@ -283,23 +313,20 @@ local function chooseWeather()
 			return weather
 		end
 	end
-	return weatherTypes[#weatherTypes] -- fallback
+	return weatherTypes[#weatherTypes]
 end
 
--- Main weather cycle loop
-	while true do
-		-- Choose a new weather that is different from the last one
-		local weather = chooseWeather()
-		while weather == lastWeather do
-			weather = chooseWeather()
-		end
-
-		-- Apply the selected weather
-		applyWeather(weather)
-
-		-- Run the current weather for a random duration between 60 and 180 seconds
-		for _ = 1, math.random(60, 180) do
-			updateRainPositions() -- Keep rain parts above players
-			task.wait(1)
-		end
+-- Main loop that manages weather transitions
+while true do
+	local weather = chooseWeather()
+	while weather == lastWeather do
+		weather = chooseWeather()
 	end
+
+	applyWeather(weather)
+
+	for _ = 1, math.random(60, 180) do
+		updateRainPositions()
+		task.wait(1)
+	end
+end
